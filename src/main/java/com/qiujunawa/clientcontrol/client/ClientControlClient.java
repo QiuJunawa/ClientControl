@@ -21,6 +21,7 @@ import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ScheduledFuture;
 
 public class ClientControlClient implements ClientModInitializer {
 
@@ -32,6 +33,11 @@ public class ClientControlClient implements ClientModInitializer {
 
     // 速度倍率
     private float speedMultiplier = 1.0f;
+
+    // 当通过快捷键或指令激活自动行走时，短时间内不要把激活键/回车判定为玩家接管。
+    // 直到所有相关键被松开后，才开始识别手动接管。
+    private volatile boolean suppressManualUntilKeysReleased = false;
+    private volatile ScheduledFuture<?> pendingExecution = null;
 
     // Getter for mixin and other classes
     public static float getSpeedMultiplier() {
@@ -154,11 +160,65 @@ public class ClientControlClient implements ClientModInitializer {
 
             if (currentWalkTask != null) currentWalkTask.tick();
 
+            // 如果当前处于 suppression 模式，等待所有相关按键被松开才开始识别接管
+            if (currentWalkTask != null) {
+                if (suppressManualUntilKeysReleased) {
+                    boolean anyPressedNow = false;
+                    try {
+                        if (client.options.forwardKey != null && client.options.forwardKey.isPressed()) anyPressedNow = true;
+                        if (client.options.backKey != null && client.options.backKey.isPressed()) anyPressedNow = true;
+                        if (client.options.leftKey != null && client.options.leftKey.isPressed()) anyPressedNow = true;
+                        if (client.options.rightKey != null && client.options.rightKey.isPressed()) anyPressedNow = true;
+                        if (client.options.jumpKey != null && client.options.jumpKey.isPressed()) anyPressedNow = true;
+                        if (client.options.sneakKey != null && client.options.sneakKey.isPressed()) anyPressedNow = true;
+                        if (toggleWalkKey != null && toggleWalkKey.isPressed()) anyPressedNow = true;
+                    } catch (Exception e) {
+                        anyPressedNow = false;
+                    }
+                    if (!anyPressedNow) {
+                        // 所有按键松开，解除 suppression，从下一次按键开始识别接管
+                        suppressManualUntilKeysReleased = false;
+                    }
+                } else {
+                    // 正常识别接管：短按或长按都算
+                    boolean manualPress = false;
+                    try {
+                        if (client.options.forwardKey != null && (client.options.forwardKey.wasPressed() || client.options.forwardKey.isPressed())) manualPress = true;
+                        if (client.options.backKey != null && (client.options.backKey.wasPressed() || client.options.backKey.isPressed())) manualPress = true;
+                        if (client.options.leftKey != null && (client.options.leftKey.wasPressed() || client.options.leftKey.isPressed())) manualPress = true;
+                        if (client.options.rightKey != null && (client.options.rightKey.wasPressed() || client.options.rightKey.isPressed())) manualPress = true;
+                        if (client.options.jumpKey != null && (client.options.jumpKey.wasPressed() || client.options.jumpKey.isPressed())) manualPress = true;
+                        if (client.options.sneakKey != null && (client.options.sneakKey.wasPressed() || client.options.sneakKey.isPressed())) manualPress = true;
+                        // 如果你希望将其他快捷键（非 toggleWalkKey）也识别为接管，可在此加入
+                    } catch (Exception e) {
+                        manualPress = false;
+                    }
+
+                    if (manualPress) {
+                        // 如果有待执行的延迟任务，取消它
+                        if (pendingExecution != null) {
+                            try { pendingExecution.cancel(false); } catch (Exception ex) { }
+                            pendingExecution = null;
+                        }
+
+                        currentWalkTask.stop();
+                        suppressManualUntilKeysReleased = false;
+                        if (client.player != null) {
+                            client.player.sendMessage(Text.literal("§c检测到玩家接管，自动行走已停止"), false);
+                        }
+                    }
+                }
+            }
+
             if (toggleWalkKey.wasPressed()) {
                 if (currentWalkTask != null && currentWalkTask.isActive()) {
+                    // 用户按下 toggle 停止，这不应被识别为“接管”场景
                     currentWalkTask.stop();
-                    client.player.sendMessage(Text.literal("§c自动行走已关闭"), false);
+                    suppressManualUntilKeysReleased = false;
+                    if (client.player != null) client.player.sendMessage(Text.literal("§c自动行走已关闭"), false);
                 } else {
+                    // 启动自动行走，并抑制接管识别直到所有键松开
+                    suppressManualUntilKeysReleased = true;
                     executeWalk("toward", "hold", -1);
                 }
             }
@@ -190,14 +250,17 @@ public class ClientControlClient implements ClientModInitializer {
         }
 
         // 在单独的调度线程中等待 500ms，然后回到客户端线程执行真正的逻辑（不会暂停游戏）
-        SCHEDULER.schedule(() -> {
+        ScheduledFuture<?> future = SCHEDULER.schedule(() -> {
             // 切回到客户端主线程执行与游戏状态交互的代码
             if (client == null) return;
             client.execute(() -> {
+                // 延迟开始执行前再检查 player 是否存在
                 if (client.player == null) {
                     System.out.println("[ClientControl] 玩家在等待期间丢失，取消执行。");
                     return;
                 }
+                // 执行时也不应当将当前按键（用于触发指令/快捷键）误判为接管。
+                // 我们仍然依赖 suppressManualUntilKeysReleased 来在按键释放后开始识别。
                 if (mode.equalsIgnoreCase("press")) {
                     // 统一停止已有任务，避免重叠
                     if (currentWalkTask != null) {
@@ -209,7 +272,7 @@ public class ClientControlClient implements ClientModInitializer {
                     System.out.println("[ClientControl] 执行按压（1 tick）！");
                 } else {
                     if (currentWalkTask != null) {
-                        System.out.println("[ClientControl] ���止旧任务！");
+                        System.out.println("[ClientControl] 停止旧任务！");
                         currentWalkTask.stop();
                     }
                     currentWalkTask = new AutoWalkTask(dir, ticks <= 0 ? -1 : ticks);
@@ -217,8 +280,13 @@ public class ClientControlClient implements ClientModInitializer {
                     client.player.sendMessage(Text.literal("§a已开启 " + dir.name + " 自动行走，时长: " + timeDesc), false);
                     System.out.println("[ClientControl] 执行按住！");
                 }
+                // 已经执行，清除 pendingExecution
+                pendingExecution = null;
             });
         }, 500, TimeUnit.MILLISECONDS);
+
+        // 记录以便在玩家接管时可以取消
+        pendingExecution = future;
     }
 
     // ==================== 方向枚举 ====================
@@ -278,8 +346,15 @@ public class ClientControlClient implements ClientModInitializer {
             dir.setPressed(client, false);
             System.out.println("[ClientControl] 松开！");
             remainingTicks = 0;
+            // 取消任何待执行的延迟任务
+            if (pendingExecution != null) {
+                try { pendingExecution.cancel(false); } catch (Exception e) { }
+                pendingExecution = null;
+            }
             // 清理外部引用以便垃圾回收，并让逻辑更清晰
             currentWalkTask = null;
+            // 解除 suppression（已停止，允许正常识别按键）
+            suppressManualUntilKeysReleased = false;
         }
 
         boolean isActive() {
