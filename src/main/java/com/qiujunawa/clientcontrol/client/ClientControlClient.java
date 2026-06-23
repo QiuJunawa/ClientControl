@@ -72,7 +72,7 @@ public class ClientControlClient implements ClientModInitializer {
 										return 1;
 									})
 									.then(argument("ticks", IntegerArgumentType.integer())
-											.executes(ctx -> {
+											executes(ctx -> {
 												String dir = StringArgumentType.getString(ctx, "direction");
 												String mode = StringArgumentType.getString(ctx, "mode");
 												int ticks = IntegerArgumentType.getInteger(ctx, "ticks");
@@ -107,6 +107,7 @@ public class ClientControlClient implements ClientModInitializer {
 							return 1;
 						}
 						if (client.crosshairTarget instanceof EntityHitResult) {
+							EntityHitResult hit = (EntityHitResult) client.crosshairTarget;
 							Entity e = hit.getEntity();
 							client.player.sendMessage(Text.literal(
 									"§e实体: §f" + e.getName().getString() +
