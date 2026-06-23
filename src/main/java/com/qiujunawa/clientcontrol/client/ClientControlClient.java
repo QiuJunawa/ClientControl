@@ -31,10 +31,17 @@ public class ClientControlClient implements ClientModInitializer {
 	private AutoWalkTask currentWalkTask = null;
 
 	// 速度倍率
-	private float speedMultiplier = 1.0f;
+	private static float speedMultiplier = 1.0f;
 
 	// 快捷键
 	private static KeyBinding toggleWalkKey;
+	private static KeyBinding speedUpKey;
+	private static KeyBinding speedDownKey;
+	private static KeyBinding toggleBulldozerKey;
+
+	public static float getSpeedMultiplier() {
+		return speedMultiplier;
+	}
 
 	// 延迟执行调度器（用于在不阻塞游戏主线程的情况下延迟执行命令）
 	private static final ScheduledExecutorService SCHEDULER = Executors.newSingleThreadScheduledExecutor(r -> {
@@ -91,7 +98,6 @@ public class ClientControlClient implements ClientModInitializer {
 											})
 									)
 							)
-						)
 					)
 			);
 
@@ -141,6 +147,27 @@ public class ClientControlClient implements ClientModInitializer {
 				GLFW.GLFW_KEY_V,
 				"category.clientcontrol"
 		));
+
+		speedUpKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
+				"key.clientcontrol.speed_up",
+				InputUtil.Type.KEYSYM,
+				GLFW.GLFW_KEY_UP,
+				"category.clientcontrol"
+		));
+
+		speedDownKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
+				"key.clientcontrol.speed_down",
+				InputUtil.Type.KEYSYM,
+				GLFW.GLFW_KEY_DOWN,
+				"category.clientcontrol"
+		));
+
+		toggleBulldozerKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
+				"key.clientcontrol.toggle_bulldozer",
+				InputUtil.Type.KEYSYM,
+				GLFW.GLFW_KEY_B,
+				"category.clientcontrol"
+		));
 	}
 
 	// ==================== Tick ====================
@@ -157,6 +184,20 @@ public class ClientControlClient implements ClientModInitializer {
 				} else {
 					executeWalk("toward", "hold", -1);
 				}
+			}
+			if (speedUpKey.wasPressed()) {
+				speedMultiplier = Math.min(1.0f, speedMultiplier + 0.05f);
+				client.player.sendMessage(Text.literal("§a速度: " + (int)(speedMultiplier * 100) + "%"), false);
+			}
+
+			if (speedDownKey.wasPressed()) {
+				speedMultiplier = Math.max(0.0f, speedMultiplier - 0.05f);
+				client.player.sendMessage(Text.literal("§a速度: " + (int)(speedMultiplier * 100) + "%"), false);
+			}
+
+			if (toggleBulldozerKey.wasPressed()) {
+				// 推土机开关逻辑（后续实现）
+				client.player.sendMessage(Text.literal("§e推土机功能开发中..."), false);
 			}
 		});
 	}
@@ -182,7 +223,7 @@ public class ClientControlClient implements ClientModInitializer {
 
 		// 给玩家一点反馈，表示命令已接收并将在 0.5 秒后执行
 		if (client.player != null) {
-			client.player.sendMessage(Text.literal("§e命令已接收，将在 0.5 秒后执行..."), false);
+			/*client.player.sendMessage(Text.literal("§e命令已接收，将在 1 tick后执行..."), false);*/
 		}
 
 		// 在单独的调度线程中等待 500ms，然后回到客户端线程执行真正的逻辑（不会暂停游戏）
@@ -214,7 +255,7 @@ public class ClientControlClient implements ClientModInitializer {
 					System.out.println("[ClientControl] 执行按住！");
 				}
 			});
-		}, 500, TimeUnit.MILLISECONDS);
+		}, 1, TimeUnit.MILLISECONDS);
 	}
 
 	// ==================== 方向枚举 ====================

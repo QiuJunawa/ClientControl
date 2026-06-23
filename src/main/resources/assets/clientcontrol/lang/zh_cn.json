@@ -1,4 +1,7 @@
 {
   "category.clientcontrol": "ClientControl 自动化",
-  "key.clientcontrol.toggle_walk": "开关自动行走"
+  "key.clientcontrol.toggle_walk": "开关自动行走",
+  "key.clientcontrol.speed_up": "速度 +5%",
+  "key.clientcontrol.speed_down": "速度 -5%",
+  "key.clientcontrol.toggle_bulldozer": "开关推土机"
 }

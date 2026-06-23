@@ -19,6 +19,9 @@
 			"com.qiujunawa.clientcontrol.client.ClientControlClient"
 		]
 	},
+	"mixins": [
+		"clientcontrol.mixins.json"
+	],
 	"depends": {
 		"fabricloader": ">=0.19.3",
 		"minecraft": "~1.21.4",
