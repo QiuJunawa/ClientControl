@@ -16,8 +16,7 @@ import com.mojang.brigadier.arguments.FloatArgumentType;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
 
-import static net.fabricmc.fabric.api.client.command.v2.ClientCommandManager.argument;
-import static net.fabricmc.fabric.api.client.command.v2.ClientCommandManager.literal;
+import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
 
 public class ClientControlClient implements ClientModInitializer {
 
@@ -50,8 +49,8 @@ public class ClientControlClient implements ClientModInitializer {
 		ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> {
 
 			// ---------- /ccwalk ----------
-			dispatcher.register(literal("ccwalk")
-					.then(argument("direction", StringArgumentType.word())
+			dispatcher.register(ClientCommandManager.literal("ccwalk")
+					.then(ClientCommandManager.argument("direction", StringArgumentType.word())
 							.suggests((ctx, builder) -> {
 								builder.suggest("toward");
 								builder.suggest("backward");
@@ -59,7 +58,7 @@ public class ClientControlClient implements ClientModInitializer {
 								builder.suggest("right");
 								return builder.buildFuture();
 							})
-							.then(argument("mode", StringArgumentType.word())
+							.then(ClientCommandManager.argument("mode", StringArgumentType.word())
 									.suggests((ctx, builder) -> {
 										builder.suggest("hold");
 										builder.suggest("press");
@@ -71,8 +70,8 @@ public class ClientControlClient implements ClientModInitializer {
 										executeWalk(dir, mode, mode.equals("press") ? 1 : -1);
 										return 1;
 									})
-									.then(argument("ticks", IntegerArgumentType.integer())
-											executes(ctx -> {
+									.then(ClientCommandManager.argument("ticks", IntegerArgumentType.integer())
+											.executes(ctx -> {
 												String dir = StringArgumentType.getString(ctx, "direction");
 												String mode = StringArgumentType.getString(ctx, "mode");
 												int ticks = IntegerArgumentType.getInteger(ctx, "ticks");
@@ -81,13 +80,14 @@ public class ClientControlClient implements ClientModInitializer {
 											})
 									)
 							)
+						)
 					)
 			);
 
 			// ---------- /ccsetspeed ----------
 			// 在命令处理处加入 player null 检查示例（/ccsetspeed 和 /ccgetid）
-			dispatcher.register(literal("ccsetspeed")
-					.then(argument("multiplier", FloatArgumentType.floatArg(0, 1))
+			dispatcher.register(ClientCommandManager.literal("ccsetspeed")
+					.then(ClientCommandManager.argument("multiplier", FloatArgumentType.floatArg(0, 1))
 							.executes(ctx -> {
 								speedMultiplier = FloatArgumentType.getFloat(ctx, "multiplier");
 								if (client.player != null) {
@@ -98,9 +98,9 @@ public class ClientControlClient implements ClientModInitializer {
 								return 1;
 							})
 					)
-			);
+				);
 
-			dispatcher.register(literal("ccgetid")
+			dispatcher.register(ClientCommandManager.literal("ccgetid")
 					.executes(ctx -> {
 						if (client.player == null) {
 							System.out.println("[ClientControl] 无玩家，无法执行 ccgetid");
@@ -111,14 +111,14 @@ public class ClientControlClient implements ClientModInitializer {
 							Entity e = hit.getEntity();
 							client.player.sendMessage(Text.literal(
 									"§e实体: §f" + e.getName().getString() +
-											" §7| ID: §f" + e.getId() +
-											" §7| UUID: §f" + e.getUuidAsString()), false);
+										" §7| ID: §f" + e.getId() +
+										" §7| UUID: §f" + e.getUuidAsString()), false);
 						} else {
 							client.player.sendMessage(Text.literal("§c请对准一个实体"), false);
 						}
 						return 1;
 					})
-			);
+				);
 		});
 	}
 
