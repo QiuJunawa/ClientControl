@@ -18,6 +18,8 @@ import com.mojang.brigadier.arguments.StringArgumentType;
 
 import static net.fabricmc.fabric.api.client.command.v2.ClientCommandManager.argument;
 import static net.fabricmc.fabric.api.client.command.v2.ClientCommandManager.literal;
+import static com.mojang.brigadier.builder.LiteralArgumentBuilder.literal;
+import static com.mojang.brigadier.builder.RequiredArgumentBuilder.argument;
 
 public class ClientControlClient implements ClientModInitializer {
 
@@ -72,7 +74,7 @@ public class ClientControlClient implements ClientModInitializer {
 										return 1;
 									})
 									.then(argument("ticks", IntegerArgumentType.integer())
-											executes(ctx -> {
+											.executes(ctx -> {
 												String dir = StringArgumentType.getString(ctx, "direction");
 												String mode = StringArgumentType.getString(ctx, "mode");
 												int ticks = IntegerArgumentType.getInteger(ctx, "ticks");
