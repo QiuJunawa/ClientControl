@@ -1,0 +1,28 @@
+{
+	"schemaVersion": 1,
+	"id": "clientcontrol",
+	"version": "${version}",
+	"name": "ClientControl",
+	"description": "一直让我按W？不可能，除非是机械动力……",
+	"authors": [
+		"QiuJun_awa"
+	],
+	"contact": {
+		"homepage": "https://fabricmc.net/",
+		"sources": "https://github.com/FabricMC/fabric-example-mod"
+	},
+	"license": "CC0-1.0",
+	"icon": "assets/clientcontrol/icon.png",
+	"environment": "client",
+	"entrypoints": {
+		"client": [
+			"com.qiujunawa.clientcontrol.client.ClientControlClient"
+		]
+	},
+	"depends": {
+		"fabricloader": ">=0.19.3",
+		"minecraft": "~1.21.4",
+		"java": ">=21",
+		"fabric-api": "*"
+	}
+}
