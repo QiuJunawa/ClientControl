@@ -18,6 +18,10 @@ import com.mojang.brigadier.arguments.StringArgumentType;
 
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
 
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+
 public class ClientControlClient implements ClientModInitializer {
 
 	private static ClientControlClient INSTANCE;
@@ -31,6 +35,13 @@ public class ClientControlClient implements ClientModInitializer {
 
 	// 快捷键
 	private static KeyBinding toggleWalkKey;
+
+	// 延迟执行调度器（用于在不阻塞游戏主线程的情况下延迟执行命令）
+	private static final ScheduledExecutorService SCHEDULER = Executors.newSingleThreadScheduledExecutor(r -> {
+		Thread t = new Thread(r, "ClientControl-Scheduler");
+		t.setDaemon(true);
+		return t;
+	});
 
 	@Override
 	public void onInitializeClient() {
@@ -153,6 +164,10 @@ public class ClientControlClient implements ClientModInitializer {
 	// ==================== 执行逻辑 ====================
 	// 修改 executeWalk 中 press 分支以及增加 player 空检查
 	private void executeWalk(String direction, String mode, int ticks) {
+		if (client == null) {
+			System.out.println("[ClientControl] client is null");
+			return;
+		}
 		if (client.player == null) {
 			System.out.println("[ClientControl] 没有玩家！");
 			return;
@@ -165,25 +180,41 @@ public class ClientControlClient implements ClientModInitializer {
 			return;
 		}
 
-		if (mode.equalsIgnoreCase("press")) {
-			// 统一停止已有任务，避免重叠
-			if (currentWalkTask != null) {
-				currentWalkTask.stop();
-			}
-			// 使用一个持续 1 tick 的任务来模拟“按一下”
-			currentWalkTask = new AutoWalkTask(dir, 1);
-			client.player.sendMessage(Text.literal("§a已执行 " + dir.name + " 一次"), false);
-			System.out.println("[ClientControl] 执行按压（1 tick）！");
-		} else {
-			if (currentWalkTask != null) {
-				System.out.println("[ClientControl] 停止旧任务！");
-				currentWalkTask.stop();
-			}
-			currentWalkTask = new AutoWalkTask(dir, ticks <= 0 ? -1 : ticks);
-			String timeDesc = ticks <= 0 ? "永久" : (ticks / 20.0 + "秒");
-			client.player.sendMessage(Text.literal("§a已开启 " + dir.name + " 自动行走，时长: " + timeDesc), false);
-			System.out.println("[ClientControl] 执行按住！");
+		// 给玩家一点反馈，表示命令已接收并将在 0.5 秒后执行
+		if (client.player != null) {
+			client.player.sendMessage(Text.literal("§e命令已接收，将在 0.5 秒后执行..."), false);
 		}
+
+		// 在单独的调度线程中等待 500ms，然后回到客户端线程执行真正的逻辑（不会暂停游戏）
+		SCHEDULER.schedule(() -> {
+			// 切回到客户端主线程执行与游戏状态交互的代码
+			if (client == null) return;
+			client.execute(() -> {
+				if (client.player == null) {
+					System.out.println("[ClientControl] 玩家在等待期间丢失，取消执行。");
+					return;
+				}
+				if (mode.equalsIgnoreCase("press")) {
+					// 统一停止已有任务，避免重叠
+					if (currentWalkTask != null) {
+						currentWalkTask.stop();
+					}
+					// 使用一个持续 1 tick 的任务来模拟“按一下”
+					currentWalkTask = new AutoWalkTask(dir, 1);
+					client.player.sendMessage(Text.literal("§a已执行 " + dir.name + " 一次"), false);
+					System.out.println("[ClientControl] 执行按压（1 tick）！");
+				} else {
+					if (currentWalkTask != null) {
+						System.out.println("[ClientControl] 停止旧任务！");
+						currentWalkTask.stop();
+					}
+					currentWalkTask = new AutoWalkTask(dir, ticks <= 0 ? -1 : ticks);
+					String timeDesc = ticks <= 0 ? "永久" : (ticks / 20.0 + "秒");
+					client.player.sendMessage(Text.literal("§a已开启 " + dir.name + " 自动行走，时长: " + timeDesc), false);
+					System.out.println("[ClientControl] 执行按住！");
+				}
+			});
+		}, 500, TimeUnit.MILLISECONDS);
 	}
 
 	// ==================== 方向枚举 ====================
@@ -191,22 +222,22 @@ public class ClientControlClient implements ClientModInitializer {
 		TOWARD("向前") {
 			void setPressed(MinecraftClient c, boolean p) {
 				if (c.options.forwardKey != null) c.options.forwardKey.setPressed(p);
-			}
+				}
 		},
 		BACKWARD("向后") {
 			void setPressed(MinecraftClient c, boolean p) {
 				if (c.options.backKey != null) c.options.backKey.setPressed(p);
-			}
+				}
 		},
 		LEFT("向左") {
 			void setPressed(MinecraftClient c, boolean p) {
 				if (c.options.leftKey != null) c.options.leftKey.setPressed(p);
-			}
+				}
 		},
 		RIGHT("向右") {
 			void setPressed(MinecraftClient c, boolean p) {
 				if (c.options.rightKey != null) c.options.rightKey.setPressed(p);
-			}
+				}
 		};
 
 		final String name;
