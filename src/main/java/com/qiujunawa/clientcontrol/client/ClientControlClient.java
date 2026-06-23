@@ -46,6 +46,9 @@ public class ClientControlClient implements ClientModInitializer {
 
     // 快捷键
     private static KeyBinding toggleWalkKey;
+    private static KeyBinding speedUpKey;
+    private static KeyBinding speedDownKey;
+    private static KeyBinding toggleBulldozerKey;
 
     // 延迟执行调度器（用于在不阻塞游戏主线程的情况下延迟执行命令）
     private static final ScheduledExecutorService SCHEDULER = Executors.newSingleThreadScheduledExecutor(r -> {
@@ -89,6 +92,7 @@ public class ClientControlClient implements ClientModInitializer {
                                     .executes(ctx -> {
                                         String dir = StringArgumentType.getString(ctx, "direction");
                                         String mode = StringArgumentType.getString(ctx, "mode");
+                                        suppressManualUntilKeysReleased = true;
                                         executeWalk(dir, mode, mode.equals("press") ? 1 : -1);
                                         return 1;
                                     })
@@ -97,6 +101,7 @@ public class ClientControlClient implements ClientModInitializer {
                                                 String dir = StringArgumentType.getString(ctx, "direction");
                                                 String mode = StringArgumentType.getString(ctx, "mode");
                                                 int ticks = IntegerArgumentType.getInteger(ctx, "ticks");
+                                                suppressManualUntilKeysReleased = true;
                                                 executeWalk(dir, mode, ticks);
                                                 return 1;
                                             })
@@ -151,6 +156,27 @@ public class ClientControlClient implements ClientModInitializer {
                 GLFW.GLFW_KEY_V,
                 "category.clientcontrol"
         ));
+
+        speedUpKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
+                "key.clientcontrol.speed_up",
+                InputUtil.Type.KEYSYM,
+                GLFW.GLFW_KEY_UP,
+                "category.clientcontrol"
+        ));
+
+        speedDownKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
+                "key.clientcontrol.speed_down",
+                InputUtil.Type.KEYSYM,
+                GLFW.GLFW_KEY_DOWN,
+                "category.clientcontrol"
+        ));
+
+        toggleBulldozerKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
+                "key.clientcontrol.toggle_bulldozer",
+                InputUtil.Type.KEYSYM,
+                GLFW.GLFW_KEY_B,
+                "category.clientcontrol"
+        ));
     }
 
     // ==================== Tick ====================
@@ -158,7 +184,10 @@ public class ClientControlClient implements ClientModInitializer {
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
             if (client.player == null) return;
 
-            if (currentWalkTask != null) currentWalkTask.tick();
+            if (currentWalkTask != null) {
+                currentWalkTask.tick();
+                currentWalkTask.applyMovement(client, speedMultiplier);
+            }
 
             // 如果当前处于 suppression 模式，等待所有相关按键被松开才开始识别接管
             if (currentWalkTask != null) {
@@ -205,6 +234,7 @@ public class ClientControlClient implements ClientModInitializer {
                         suppressManualUntilKeysReleased = false;
                         if (client.player != null) {
                             client.player.sendMessage(Text.literal("§c检测到玩家接管，自动行走已停止"), false);
+                            client.player.sendMessage(Text.literal("§c如果你无缘无故接收到此消息，则可能是误判"), false);
                         }
                     }
                 }
@@ -221,6 +251,19 @@ public class ClientControlClient implements ClientModInitializer {
                     suppressManualUntilKeysReleased = true;
                     executeWalk("toward", "hold", -1);
                 }
+            }if (speedUpKey.wasPressed()) {
+                speedMultiplier = Math.min(1.0f, speedMultiplier + 0.05f);
+                client.player.sendMessage(Text.literal("§a速度: " + (int)(speedMultiplier * 100) + "%"), false);
+            }
+
+            if (speedDownKey.wasPressed()) {
+                speedMultiplier = Math.max(0.0f, speedMultiplier - 0.05f);
+                client.player.sendMessage(Text.literal("§a速度: " + (int)(speedMultiplier * 100) + "%"), false);
+            }
+
+            if (toggleBulldozerKey.wasPressed()) {
+                // 推土机开关逻辑（后续实现）
+                client.player.sendMessage(Text.literal("§e推土机功能开发中..."), false);
             }
         });
     }
@@ -246,7 +289,7 @@ public class ClientControlClient implements ClientModInitializer {
 
         // 给玩家一点反馈，表示命令已接收并将在 0.5 秒后执行
         if (client.player != null) {
-            client.player.sendMessage(Text.literal("§e命令已接收，将在 0.5 秒后执行..."), false);
+            //client.player.sendMessage(Text.literal("§e命令已接收，将在 0.5 秒后执行..."), false);
         }
 
         // 在单独的调度线程中等待 500ms，然后回到客户端线程执行真正的逻辑（不会暂停游戏）
@@ -283,7 +326,7 @@ public class ClientControlClient implements ClientModInitializer {
                 // 已经执行，清除 pendingExecution
                 pendingExecution = null;
             });
-        }, 500, TimeUnit.MILLISECONDS);
+        }, 1, TimeUnit.MILLISECONDS);
 
         // 记录以便在玩家接管时可以取消
         pendingExecution = future;
@@ -359,6 +402,51 @@ public class ClientControlClient implements ClientModInitializer {
 
         boolean isActive() {
             return remainingTicks != 0;
+        }
+
+        void applyMovement(MinecraftClient client, float speedMultiplier) {
+            if (client.player == null) return;
+            if (this.dir == null) return;
+
+            // 基础速度（原版行走速度约为 0.1）
+            double baseSpeed = 0.1;
+            double speed = baseSpeed * speedMultiplier;
+            if (speedMultiplier <= 0.0f) {
+                client.player.setVelocity(0, client.player.getVelocity().y, 0);
+                return;
+            }
+
+            float yaw = client.player.getYaw();
+            double rad = Math.toRadians(yaw);
+            double vx, vz;
+
+            // 根据方向计算速度向量
+            switch (this.dir) {
+                case TOWARD:
+                    vx = -Math.sin(rad) * speed;
+                    vz = Math.cos(rad) * speed;
+                    break;
+                case BACKWARD:
+                    vx = Math.sin(rad) * speed;
+                    vz = -Math.cos(rad) * speed;
+                    break;
+                case LEFT:
+                    vx = Math.cos(rad) * speed;
+                    vz = Math.sin(rad) * speed;
+                    break;
+                case RIGHT:
+                    vx = -Math.cos(rad) * speed;
+                    vz = -Math.sin(rad) * speed;
+                    break;
+                default:
+                    vx = 0;
+                    vz = 0;
+                    break;
+            }
+
+            // 保留垂直速度（跳跃/下落不受影响）
+            double vy = client.player.getVelocity().y;
+            client.player.setVelocity(vx, vy, vz);
         }
     }
 }

@@ -5,14 +5,14 @@ import net.minecraft.client.network.ClientPlayerEntity;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.ModifyVariable;
-import org.spongepowered.asm.mixin.injection.Redirect;
 
 @Mixin(ClientPlayerEntity.class)
 public class ClientPlayerEntityMixin {
 
-    @Redirect(
+    @ModifyVariable(
             method = "tickMovement",
-            at = @At(value = "INVOKE", target = "Lnet/minecraft/client/network/ClientPlayerEntity;getAttributeValue(Lnet/minecraft/entity/attribute/EntityAttribute;)D")
+            at = @At(value = "STORE", ordinal = 0),
+            ordinal = 0
     )
     private float modifySpeed(float original) {
         float multiplier = ClientControlClient.getSpeedMultiplier();
