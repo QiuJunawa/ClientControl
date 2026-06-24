@@ -98,11 +98,12 @@ public class ClientControlClient implements ClientModInitializer {
                         client.player.getZ(),
                         newYaw,
                         newPitch,
-                        client.player.isOnGround()
+                        client.player.isOnGround(),
+                        client.player.horizontalCollision
                 )
         );
 
-        String yawDir = getDirectionName(newYaw);
+        String yawDir = getYawName(newYaw);
         String pitchDir = getPitchName(newPitch);
         client.player.sendMessage(Text.literal(
                 "§a视角已设置: §f" + yawDir + " (" + (int)newYaw + "°)" +
