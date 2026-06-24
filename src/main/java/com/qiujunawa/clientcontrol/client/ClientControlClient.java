@@ -68,6 +68,93 @@ public class ClientControlClient implements ClientModInitializer {
 
         System.out.println("[ClientControl] 模组加载成功！");
     }
+    // ==================== 视角控制 ====================
+
+    /**
+     * 设置玩家朝向角度
+     * @param yaw 偏航角，null 表示保持不变
+     * @param pitch 俯仰角，null 表示保持不变
+     */
+    private void setFacing(Float yaw, Float pitch) {
+        if (client == null || client.player == null) {
+            System.out.println("[ClientControl] 无法设置朝向：玩家不存在");
+            return;
+        }
+
+        float currentYaw = client.player.getYaw();
+        float currentPitch = client.player.getPitch();
+
+        float newYaw = (yaw != null) ? yaw : currentYaw;
+        float newPitch = (pitch != null) ? Math.clamp(pitch, -90.0f, 90.0f) : currentPitch;
+
+        client.player.setYaw(newYaw);
+        client.player.setPitch(newPitch);
+
+        // 直接发送位置更新包（包含旋转信息）
+        client.player.networkHandler.sendPacket(
+                new net.minecraft.network.packet.c2s.play.PlayerMoveC2SPacket.Full(
+                        client.player.getX(),
+                        client.player.getY(),
+                        client.player.getZ(),
+                        newYaw,
+                        newPitch,
+                        client.player.isOnGround()
+                )
+        );
+
+        String yawDir = getDirectionName(newYaw);
+        String pitchDir = getPitchName(newPitch);
+        client.player.sendMessage(Text.literal(
+                "§a视角已设置: §f" + yawDir + " (" + (int)newYaw + "°)" +
+                        " §7| §a俯仰: §f" + pitchDir + " (" + (int)newPitch + "°)"
+        ), false);
+    }
+
+    /**
+     * 重置视角到当前朝向（仅显示提示）
+     */
+    private void showCurrentFacing() {
+        if (client == null || client.player == null) return;
+
+        float yaw = client.player.getYaw();
+        float pitch = client.player.getPitch();
+
+        String yawDir = getYawName(yaw);
+        String pitchDir = getPitchName(pitch);
+
+        client.player.sendMessage(Text.literal(
+                "§6当前视角: §f" + yawDir + " (" + (int)yaw + "°)" +
+                        " §7| §6俯仰: §f" + pitchDir + " (" + (int)pitch + "°)"
+        ), false);
+    }
+
+    /**
+     * 将角度转换为方向名称
+     */
+    private String getYawName(float yaw) {
+        // 将角度归一化到 0-360
+        float normalized = yaw % 360;
+        if (normalized < 0) normalized += 360;
+
+        if (normalized < 45 || normalized >= 315) return "南";
+        if (normalized >= 45 && normalized < 135) return "西";
+        if (normalized >= 135 && normalized < 225) return "北";
+        if (normalized >= 225) return "东";
+        return "未知";
+    }
+    /**
+     * 将 Pitch 角度转换为描述
+     */
+    private String getPitchName(float pitch) {
+        if (pitch < -75) return "正上方 (看天)";
+        if (pitch < -45) return "仰视";
+        if (pitch < -15) return "微仰";
+        if (pitch <= 15) return "水平";
+        if (pitch < 45) return "微俯";
+        if (pitch < 75) return "俯视";
+        return "正下方 (看地)";
+    }
+
 
     // ==================== 指令注册 ====================
     private void registerCommands() {
@@ -126,6 +213,7 @@ public class ClientControlClient implements ClientModInitializer {
                     )
             );
 
+            //----------/ccgetid--------------
             dispatcher.register(ClientCommandManager.literal("ccgetid")
                     .executes(ctx -> {
                         if (client.player == null) {
@@ -144,6 +232,66 @@ public class ClientControlClient implements ClientModInitializer {
                         }
                         return 1;
                     })
+            );
+            // ---------- /ccfacing ----------
+            dispatcher.register(ClientCommandManager.literal("ccfacing")
+                    // 预设方向（仅 Yaw，Pitch 保持原样）
+                    .then(ClientCommandManager.literal("north")
+                            .executes(ctx -> {
+                                setFacing(180.0f, null);
+                                return 1;
+                            }))
+                    .then(ClientCommandManager.literal("south")
+                            .executes(ctx -> {
+                                setFacing(0.0f, null);
+                                return 1;
+                            }))
+                    .then(ClientCommandManager.literal("east")
+                            .executes(ctx -> {
+                                setFacing(-90.0f, null);
+                                return 1;
+                            }))
+                    .then(ClientCommandManager.literal("west")
+                            .executes(ctx -> {
+                                setFacing(90.0f, null);
+                                return 1;
+                            }))
+                    // 仅设置 Yaw（Pitch 保持不变）
+                    .then(ClientCommandManager.literal("yaw")
+                            .then(ClientCommandManager.argument("angle", FloatArgumentType.floatArg())
+                                    .executes(ctx -> {
+                                        float yaw = FloatArgumentType.getFloat(ctx, "angle");
+                                        setFacing(yaw, null);
+                                        return 1;
+                                    }))
+                    )
+                    // 仅设置 Pitch（Yaw 保持不变）
+                    .then(ClientCommandManager.literal("pitch")
+                            .then(ClientCommandManager.argument("angle", FloatArgumentType.floatArg())
+                                    .executes(ctx -> {
+                                        float pitch = FloatArgumentType.getFloat(ctx, "angle");
+                                        setFacing(null, pitch);
+                                        return 1;
+                                    }))
+                    )
+                    // 同时设置 Yaw 和 Pitch
+                    .then(ClientCommandManager.literal("set")
+                            .then(ClientCommandManager.argument("yaw", FloatArgumentType.floatArg())
+                                    .then(ClientCommandManager.argument("pitch", FloatArgumentType.floatArg())
+                                            .executes(ctx -> {
+                                                float yaw = FloatArgumentType.getFloat(ctx, "yaw");
+                                                float pitch = FloatArgumentType.getFloat(ctx, "pitch");
+                                                setFacing(yaw, pitch);
+                                                return 1;
+                                            }))
+                            )
+                    )
+                    // 显示当前朝向
+                    .then(ClientCommandManager.literal("get")
+                            .executes(ctx -> {
+                                showCurrentFacing();
+                                return 1;
+                            }))
             );
         });
     }
@@ -186,7 +334,8 @@ public class ClientControlClient implements ClientModInitializer {
 
             if (currentWalkTask != null) {
                 currentWalkTask.tick();
-                currentWalkTask.applyMovement(client, speedMultiplier);
+                if(currentWalkTask != null)
+                    currentWalkTask.applyMovement(client, speedMultiplier);
             }
 
             // 如果当前处于 suppression 模式，等待所有相关按键被松开才开始识别接管
