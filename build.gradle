@@ -13,8 +13,16 @@ repositories {
 		url = "https://maven.fabricmc.net/"
 	}
 	maven {
+		name = "Modrinth"
+		url = "https://api.modrinth.com/maven"
+	}
+	maven {
 		name = "Aliyun"
 		url = "https://maven.aliyun.com/repository/public"
+	}
+	maven {
+		name = "masa"
+		url = "https://masa.dy.fi/maven/"
 	}
 	mavenCentral()
 }
@@ -24,6 +32,8 @@ dependencies {
 	mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
 	modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
 	modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+	modImplementation "maven.modrinth:modmenu:15.0.2"
+	modImplementation files("libs/malilib-fabric-1.21.8-0.25.5.jar")
 }
 
 processResources {

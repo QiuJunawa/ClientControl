@@ -8,8 +8,8 @@
 		"QiuJun_awa"
 	],
 	"contact": {
-		"homepage": "https://fabricmc.net/",
-		"sources": "https://github.com/FabricMC/fabric-example-mod"
+		"homepage": "https://modrinth.com/mod/clientcontrol",
+		"sources": "https://github.com/QiuJunawa/ClientControl/"
 	},
 	"license": "CC0-1.0",
 	"icon": "assets/clientcontrol/icon.png",
@@ -17,6 +17,9 @@
 	"entrypoints": {
 		"client": [
 			"com.qiujunawa.clientcontrol.client.ClientControlClient"
+		],
+		"modmenu": [
+			"com.qiujunawa.clientcontrol.client.ModMenuIntegration"
 		]
 	},
 	"mixins": [

@@ -5,16 +5,20 @@ import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallba
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.gui.DrawContext;
+import net.minecraft.client.gui.screen.Screen;
 import net.minecraft.client.option.KeyBinding;
 import net.minecraft.client.util.InputUtil;
 import net.minecraft.text.Text;
 import net.minecraft.util.hit.EntityHitResult;
 import net.minecraft.entity.Entity;
+import net.minecraft.client.Mouse;
 
 import org.lwjgl.glfw.GLFW;
 import com.mojang.brigadier.arguments.FloatArgumentType;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
+import net.minecraft.client.util.InputUtil;
 
 import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
 
@@ -23,13 +27,23 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.ScheduledFuture;
 
+import java.io.*;
+import java.util.*;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import net.minecraft.client.gui.widget.ButtonWidget;
+import org.lwjgl.glfw.GLFW;
+import java.util.Arrays;
+
 public class ClientControlClient implements ClientModInitializer {
 
-    private static ClientControlClient INSTANCE;
+    public static ClientControlClient INSTANCE;
     private MinecraftClient client;
 
     // 自动行走任务
     private AutoWalkTask currentWalkTask = null;
+
+    //重要！！！当前录制版本：
+    private static final int RECORDING_VERSION = 2;  // 当前录制版本
 
     // 速度倍率
     private float speedMultiplier = 1.0f;
@@ -50,6 +64,94 @@ public class ClientControlClient implements ClientModInitializer {
     private static KeyBinding speedDownKey;
     private static KeyBinding toggleBulldozerKey;
 
+    // ==================== 录制/回放 ====================
+    private boolean isRecording = false;
+    private boolean isPlaying = false;
+    private BufferedWriter recordingWriter = null;
+    private String currentRecordingName = "";
+    private long recordingStartTime = 0;
+    private long playbackStartTime = 0;
+    private Queue<String> playbackQueue = new ConcurrentLinkedQueue<>();
+
+    // 录制起始视角（用于计算相对视角）
+    private float recordingStartYaw = 0, recordingStartPitch = 0;
+    // 录制起始位置（用于计算相对位置）
+    private double recordingStartX = 0, recordingStartY = 0, recordingStartZ = 0;
+    // 回放起始视角（用于计算相对视角）
+    private float playbackStartYaw = 0, playbackStartPitch = 0;
+    // 回放起始位置（用于计算相对位置）
+    private double playbackStartX = 0, playbackStartY = 0, playbackStartZ = 0;
+
+    // 去重 - 按键状态（只跟踪我们关心的按键）
+    private final java.util.Map<Integer, Boolean> lastKeyStates = new java.util.HashMap<>();
+    // 去重 - 视角
+    private float lastRecordedYaw = Float.NaN, lastRecordedPitch = Float.NaN;
+
+    // 位置校准 - 上次校准时间
+    private long lastCalibrationTime = 0;
+
+    // 录制 flush 计数器（每 N tick 刷一次盘，减少磁盘 IO）
+    private int flushCounter = 0;
+    private static final int FLUSH_INTERVAL = 5; // 每 5 tick 刷一次盘
+
+    // ==================== 录制/回放 ====================
+
+    // 快捷栏状态
+    private int recordingHotbarSlot = 0;
+    private int playbackHotbarSlot = 0;
+
+    // 滚轮状态（用于去重）
+    private int lastRecordedScroll = 0;
+
+    // 需要录制的按键列表（GLFW 按键码）
+    private static final int[] RECORDED_KEYS = {
+        // 移动
+        GLFW.GLFW_KEY_W,
+        GLFW.GLFW_KEY_A,
+        GLFW.GLFW_KEY_S,
+        GLFW.GLFW_KEY_D,
+        // 跳跃
+        GLFW.GLFW_KEY_SPACE,
+        // 潜行（左右）
+        GLFW.GLFW_KEY_LEFT_SHIFT,
+        GLFW.GLFW_KEY_RIGHT_SHIFT,
+        // 疾跑（左右Ctrl）
+        GLFW.GLFW_KEY_LEFT_CONTROL,
+        GLFW.GLFW_KEY_RIGHT_CONTROL,
+        // 鼠标按键
+        GLFW.GLFW_MOUSE_BUTTON_LEFT,
+        GLFW.GLFW_MOUSE_BUTTON_RIGHT,
+        // 数字键 1-9
+        GLFW.GLFW_KEY_1,
+        GLFW.GLFW_KEY_2,
+        GLFW.GLFW_KEY_3,
+        GLFW.GLFW_KEY_4,
+        GLFW.GLFW_KEY_5,
+        GLFW.GLFW_KEY_6,
+        GLFW.GLFW_KEY_7,
+        GLFW.GLFW_KEY_8,
+        GLFW.GLFW_KEY_9,
+        // 功能键
+        GLFW.GLFW_KEY_E,   // 背包
+        GLFW.GLFW_KEY_Q,   // 丢弃
+        GLFW.GLFW_KEY_F    // 交换副手
+    };
+    // 滚轮增量（累积，录制后清零）
+    private double accumulatedScrollDelta = 0;
+
+    public void addScrollDelta(double delta) {
+        this.accumulatedScrollDelta += delta;
+    }
+
+    public double getAndClearScrollDelta() {
+        double delta = this.accumulatedScrollDelta;
+        this.accumulatedScrollDelta = 0;
+        return delta;
+    }
+
+    private File recordingDir = new File("config/clientcontrol/recordings/");
+
+
     // 延迟执行调度器（用于在不阻塞游戏主线程的情况下延迟执行命令）
     private static final ScheduledExecutorService SCHEDULER = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread t = new Thread(r, "ClientControl-Scheduler");
@@ -57,16 +159,355 @@ public class ClientControlClient implements ClientModInitializer {
         return t;
     });
 
+    // 添加 getter
+    public static ClientControlClient getInstance() {
+        return INSTANCE;
+    }
+
+    // 创建配置界面（支持父界面）
+    public Screen createConfigScreen(Screen parent) {
+        return new ConfigScreen(parent ,null);
+    }
+
+    /**
+     * 根据 GLFW 按键码模拟按键
+     */
+    private void simulateKeyByGLFWCode(int keyCode, boolean pressed) {
+        if (client.options == null) return;
+
+        // 映射 GLFW 按键码到 Minecraft 按键绑定
+        // WASD
+        if (keyCode == GLFW.GLFW_KEY_W) client.options.forwardKey.setPressed(pressed);
+        else if (keyCode == GLFW.GLFW_KEY_S) client.options.backKey.setPressed(pressed);
+        else if (keyCode == GLFW.GLFW_KEY_A) client.options.leftKey.setPressed(pressed);
+        else if (keyCode == GLFW.GLFW_KEY_D) client.options.rightKey.setPressed(pressed);
+            // 空格
+        else if (keyCode == GLFW.GLFW_KEY_SPACE) client.options.jumpKey.setPressed(pressed);
+            // Shift
+        else if (keyCode == GLFW.GLFW_KEY_LEFT_SHIFT || keyCode == GLFW.GLFW_KEY_RIGHT_SHIFT)
+            client.options.sneakKey.setPressed(pressed);
+            // Ctrl
+        else if (keyCode == GLFW.GLFW_KEY_LEFT_CONTROL || keyCode == GLFW.GLFW_KEY_RIGHT_CONTROL)
+            client.options.sprintKey.setPressed(pressed);
+            // 鼠标左键（特殊处理）
+        else if (keyCode == GLFW.GLFW_MOUSE_BUTTON_LEFT)
+            client.options.attackKey.setPressed(pressed);
+            // 鼠标右键
+        else if (keyCode == GLFW.GLFW_MOUSE_BUTTON_RIGHT)
+            client.options.useKey.setPressed(pressed);
+            // 数字键（热键栏）
+        else if (keyCode >= GLFW.GLFW_KEY_1 && keyCode <= GLFW.GLFW_KEY_9) {
+            int slot = keyCode - GLFW.GLFW_KEY_1;
+            if (pressed && client.player != null) {
+                try {
+                    // 用反射设置 selectedSlot（绕过 private 访问限制）
+                    java.lang.reflect.Field field = net.minecraft.entity.player.PlayerInventory.class.getDeclaredField("selectedSlot");
+                    field.setAccessible(true);
+                    field.setInt(client.player.getInventory(), slot);
+                } catch (Exception e) {
+                    System.err.println("[ClientControl] 设置物品栏失败: " + e.getMessage());
+                }
+            }
+        }
+        // E（打开背包）
+        else if (keyCode == GLFW.GLFW_KEY_E) {
+            client.options.inventoryKey.setPressed(pressed);
+        }
+        // Q（丢弃物品）
+        else if (keyCode == GLFW.GLFW_KEY_Q) {
+            client.options.dropKey.setPressed(pressed);
+        }
+        // F（交换副手）
+        else if (keyCode == GLFW.GLFW_KEY_F) {
+            client.options.swapHandsKey.setPressed(pressed);
+        }
+        // 其他按键可以继续添加...
+    }
+
+    // ==================== 配置界面 ====================
+
+    // 确保调用新的配置界面
+    private void openConfigScreen() {
+        if (client == null) return;
+        client.execute(() -> {
+            client.setScreen(com.qiujunawa.clientcontrol.config.ClientControlConfig.createConfigScreen());
+        });
+    }
+
+    private class ConfigScreen extends net.minecraft.client.gui.screen.Screen {
+        private final net.minecraft.client.gui.screen.Screen parent;
+        private final Runnable closeCallback;
+
+        ConfigScreen(net.minecraft.client.gui.screen.Screen parent) {
+            this(parent, null);
+        }
+
+        ConfigScreen(net.minecraft.client.gui.screen.Screen parent, Runnable closeCallback) {
+            super(Text.literal("ClientControl 配置"));
+            this.parent = parent;
+            this.closeCallback = closeCallback;
+        }
+
+        @Override
+        protected void init() {
+            int centerX = this.width / 2;
+            int baseY = this.height / 2 - 80;
+
+            // ====== 寻路模式 ======
+            this.addDrawableChild(ButtonWidget.builder(
+                    Text.literal("§b寻路模式: §f" + config.retryMode.getDisplayName()),
+                    button -> {
+                        RetryPathMode[] modes = RetryPathMode.values();
+                        int idx = (config.retryMode.ordinal() + 1) % modes.length;
+                        config.retryMode = modes[idx];
+                        config.save();
+                        this.init();
+                    }
+            ).dimensions(centerX - 100, baseY, 200, 20).build());
+
+            // ====== 最大重试次数 ======
+            this.addDrawableChild(ButtonWidget.builder(
+                    Text.literal("§b最大重试次数: §f" + config.maxRetries),
+                    button -> {
+                        config.maxRetries = config.maxRetries >= 10 ? 1 : config.maxRetries + 1;
+                        config.save();
+                        this.init();
+                    }
+            ).dimensions(centerX - 100, baseY + 30, 200, 20).build());
+
+            // ====== 移动速度 ======
+            this.addDrawableChild(ButtonWidget.builder(
+                    Text.literal("§b移动速度: §f" + String.format("%.2f", config.moveSpeed)),
+                    button -> {
+                        config.moveSpeed += 0.05f;
+                        if (config.moveSpeed > 1.0f) config.moveSpeed = 0.05f;
+                        config.save();
+                        this.init();
+                    }
+            ).dimensions(centerX - 100, baseY + 60, 200, 20).build());
+
+            // ====== 重置默认 ======
+            this.addDrawableChild(ButtonWidget.builder(
+                    Text.literal("§c重置默认"),
+                    button -> {
+                        config.retryMode = RetryPathMode.STRAIGHT;
+                        config.maxRetries = 3;
+                        config.moveSpeed = 0.15f;
+                        config.save();
+                        this.init();
+                        if (client.player != null) {
+                            client.player.sendMessage(Text.literal("§a配置已重置"), false);
+                        }
+                    }
+            ).dimensions(centerX - 100, baseY + 100, 200, 20).build());
+
+            // ====== 关闭按钮（放在右上角） ======
+            this.addDrawableChild(ButtonWidget.builder(
+                    Text.literal("§e✕ 关闭"),
+                    button -> this.close()
+            ).dimensions(this.width - 70, 10, 60, 20).build());
+        }
+
+        @Override
+        public void render(DrawContext context, int mouseX, int mouseY, float delta) {
+            // 只调用一次 renderBackground
+            //this.renderBackground(context, mouseX, mouseY, delta);
+
+            int centerX = this.width / 2;
+
+            // 标题
+            String titleText = "§6§lClientControl";
+            int titleWidth = this.textRenderer.getWidth(titleText);
+            context.drawText(this.textRenderer, titleText,
+                    centerX - titleWidth / 2, 30, 0xFFFFFF, true);
+
+            // 副标题
+            String subTitleText = "§7配置面板";
+            int subTitleWidth = this.textRenderer.getWidth(subTitleText);
+            context.drawText(this.textRenderer, subTitleText,
+                    centerX - subTitleWidth / 2, 50, 0xCCCCCC, true);
+
+            // 模式说明
+            String descText = "§8" + config.retryMode.getDescription();
+            int descWidth = this.textRenderer.getWidth(descText);
+            context.drawText(this.textRenderer, descText,
+                    centerX - descWidth / 2, this.height / 2 - 45, 0x999999, true);
+
+            // 渲染按钮——用 super 绘制子组件
+            super.render(context, mouseX, mouseY, delta);
+        }
+
+        @Override
+        public void close() {
+            if (closeCallback != null) {
+                closeCallback.run();
+            }
+            if (parent != null) {
+                client.setScreen(parent);
+            } else {
+                super.close();
+            }
+        }
+    }
+
+    // ==================== 配置管理 ====================
+
+    public enum RetryPathMode {
+        STRAIGHT("直线", "直接直线冲向目标"),
+        VILLAGER("村民", "使用村民AI寻路绕障"),
+        RESTART("从头再来", "重置到录制起点重试，但除非你要跑酷，否则不推荐");
+
+        private final String displayName;
+        private final String description;
+
+        RetryPathMode(String displayName, String description) {
+            this.displayName = displayName;
+            this.description = description;
+        }
+
+        public String getDisplayName() { return displayName; }
+        public String getDescription() { return description; }
+    }
+
+    private static class Config {
+        RetryPathMode retryMode = RetryPathMode.STRAIGHT;
+        int maxRetries = 3;
+        int retryWaitTicks = 10;
+        double moveSpeed = 0.15;
+        int calibrationRate = 1000; // 位置校准间隔（毫秒），0 = 关闭
+
+        private static final File CONFIG_FILE = new File("config/clientcontrol/clientcontrol.txt");
+
+        void save() {
+            try {
+                CONFIG_FILE.getParentFile().mkdirs();
+                try (PrintWriter writer = new PrintWriter(new FileWriter(CONFIG_FILE))) {
+                    writer.println("retryMode=" + retryMode.name());
+                    writer.println("maxRetries=" + maxRetries);
+                    writer.println("retryWaitTicks=" + retryWaitTicks);
+                    writer.println("moveSpeed=" + moveSpeed);
+                    writer.println("calibrationRate=" + calibrationRate);
+                }
+            } catch (Exception e) {}
+        }
+
+        void load() {
+            try {
+                if (!CONFIG_FILE.exists()) return;
+                try (BufferedReader reader = new BufferedReader(new FileReader(CONFIG_FILE))) {
+                    String line;
+                    while ((line = reader.readLine()) != null) {
+                        line = line.trim();
+                        if (line.isEmpty() || line.startsWith("#")) continue;
+                        String[] parts = line.split("=", 2);
+                        if (parts.length < 2) continue;
+                        switch (parts[0]) {
+                            case "retryMode":
+                                try { retryMode = RetryPathMode.valueOf(parts[1]); } catch (Exception e) {}
+                                break;
+                            case "maxRetries":
+                                try { maxRetries = Integer.parseInt(parts[1]); } catch (Exception e) {}
+                                break;
+                            case "retryWaitTicks":
+                                try { retryWaitTicks = Integer.parseInt(parts[1]); } catch (Exception e) {}
+                                break;
+                            case "moveSpeed":
+                                try { moveSpeed = Double.parseDouble(parts[1]); } catch (Exception e) {}
+                                break;
+                            case "calibrationRate":
+                                try { calibrationRate = Integer.parseInt(parts[1]); } catch (Exception e) {}
+                                break;
+                        }
+                    }
+                }
+            } catch (Exception e) {}
+        }
+    }
+
+    private Config config = new Config();
+
     @Override
     public void onInitializeClient() {
         INSTANCE = this;
         client = MinecraftClient.getInstance();
+
+        config.load();
+        com.qiujunawa.clientcontrol.config.ClientControlConfig.register();
 
         registerCommands();
         registerHotkeys();
         registerTickHandler();
 
         System.out.println("[ClientControl] 模组加载成功！");
+    }    /**
+     * 执行位置微调：相对于脚下方块的相对位置
+     * ~ 表示保持当前值不变
+     */
+    private void executeTweak(String xStr, String yStr, String zStr, String yawStr, String pitchStr) {
+        if (client.player == null) {
+            System.out.println("[ClientControl] 无玩家，无法执行 tweak");
+            return;
+        }
+
+        // 获取当前位置和视角
+        double currentX = client.player.getX();
+        double currentY = client.player.getY();
+        double currentZ = client.player.getZ();
+        float currentYaw = client.player.getYaw();
+        float currentPitch = client.player.getPitch();
+
+        // 计算脚下方块坐标
+        int blockX = (int) Math.floor(currentX);
+        int blockY = (int) Math.floor(currentY - 0.0001); // 站在方块上时，脚的Y刚好是整数，减一点避免取到上一个方块
+        int blockZ = (int) Math.floor(currentZ);
+
+        // 计算新位置
+        double newX = currentX;
+        double newY = currentY;
+        double newZ = currentZ;
+        float newYaw = currentYaw;
+        float newPitch = currentPitch;
+
+        try {
+            // X 坐标（相对方块）
+            if (!xStr.equals("~")) {
+                newX = blockX + Double.parseDouble(xStr);
+            }
+
+            // Y 坐标（相对方块）
+            if (!yStr.equals("~")) {
+                newY = blockY + Double.parseDouble(yStr);
+            }
+
+            // Z 坐标（相对方块）
+            if (!zStr.equals("~")) {
+                newZ = blockZ + Double.parseDouble(zStr);
+            }
+
+            // Yaw 视角（绝对角度）
+            if (!yawStr.equals("~")) {
+                newYaw = Float.parseFloat(yawStr);
+            }
+
+            // Pitch 视角（绝对角度）
+            if (!pitchStr.equals("~")) {
+                newPitch = Float.parseFloat(pitchStr);
+            }
+        } catch (NumberFormatException e) {
+            client.player.sendMessage(Text.literal("§c参数格式错误，请输入数字或 ~"), false);
+            return;
+        }
+
+        // 设置新位置和视角
+        client.player.setPos(newX, newY, newZ);
+        client.player.setYaw(newYaw);
+        client.player.setPitch(newPitch);
+
+        // 发送反馈消息
+        client.player.sendMessage(Text.literal(String.format(
+                "§a位置已微调: X=%.3f Y=%.3f Z=%.3f Yaw=%.1f Pitch=%.1f",
+                newX, newY, newZ, newYaw, newPitch
+        )), false);
     }
     // ==================== 视角控制 ====================
 
@@ -195,6 +636,47 @@ public class ClientControlClient implements ClientModInitializer {
                                             })
                                     )
                             )
+                    )                    // tweak 子命令：在脚下方块上微调相对位置
+                    .then(ClientCommandManager.literal("tweak")
+                            .then(ClientCommandManager.argument("x", StringArgumentType.word())
+                                    .then(ClientCommandManager.argument("y", StringArgumentType.word())
+                                            .then(ClientCommandManager.argument("z", StringArgumentType.word())
+                                                    .executes(ctx -> {
+                                                        executeTweak(
+                                                                StringArgumentType.getString(ctx, "x"),
+                                                                StringArgumentType.getString(ctx, "y"),
+                                                                StringArgumentType.getString(ctx, "z"),
+                                                                "~", "~"
+                                                        );
+                                                        return 1;
+                                                    })
+                                                    .then(ClientCommandManager.argument("yaw", StringArgumentType.word())
+                                                            .executes(ctx -> {
+                                                                executeTweak(
+                                                                        StringArgumentType.getString(ctx, "x"),
+                                                                        StringArgumentType.getString(ctx, "y"),
+                                                                        StringArgumentType.getString(ctx, "z"),
+                                                                        StringArgumentType.getString(ctx, "yaw"),
+                                                                        "~"
+                                                                );
+                                                                return 1;
+                                                            })
+                                                            .then(ClientCommandManager.argument("pitch", StringArgumentType.word())
+                                                                    .executes(ctx -> {
+                                                                        executeTweak(
+                                                                                StringArgumentType.getString(ctx, "x"),
+                                                                                StringArgumentType.getString(ctx, "y"),
+                                                                                StringArgumentType.getString(ctx, "z"),
+                                                                                StringArgumentType.getString(ctx, "yaw"),
+                                                                                StringArgumentType.getString(ctx, "pitch")
+                                                                        );
+                                                                        return 1;
+                                                                    })
+                                                            )
+                                                    )
+                                            )
+                                    )
+                            )
                     )
             );
 
@@ -294,6 +776,48 @@ public class ClientControlClient implements ClientModInitializer {
                                 return 1;
                             }))
             );
+
+            // ========== /ccaction ==========
+            dispatcher.register(ClientCommandManager.literal("ccaction")
+                    .then(ClientCommandManager.literal("record")
+                            .then(ClientCommandManager.argument("name", StringArgumentType.word())
+                                    .executes(ctx -> {
+                                        String name = StringArgumentType.getString(ctx, "name");
+                                        startRecording(name);
+                                        return 1;
+                                    }))
+                    )
+                    .then(ClientCommandManager.literal("stop")
+                            .executes(ctx -> {
+                                if (isRecording) {
+                                    stopRecording();
+                                } else if (isPlaying) {
+                                    stopPlayback();
+                                } else {
+                                    client.player.sendMessage(Text.literal("§c没有正在进行的录制或回放"), false);
+                                }
+                                return 1;
+                            })
+                    )
+                    .then(ClientCommandManager.literal("play")
+                            .then(ClientCommandManager.argument("name", StringArgumentType.word())
+                                    .executes(ctx -> {
+                                        String name = StringArgumentType.getString(ctx, "name");
+                                        startPlayback(name);
+                                        return 1;
+                                    }))
+                    )
+                    .then(ClientCommandManager.literal("list")
+                            .executes(ctx -> {
+                                listRecordings();
+                                return 1;
+                            }))
+                    .then(ClientCommandManager.literal("config")
+                            .executes(ctx -> {
+                                openConfigScreen();
+                                return 1;
+                            }))
+            );
         });
     }
 
@@ -331,6 +855,32 @@ public class ClientControlClient implements ClientModInitializer {
     // ==================== Tick ====================
     private void registerTickHandler() {
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
+            // ===== 录制更新 =====
+            if (isRecording) {
+                recordTick();
+            }
+
+            // ===== 回放更新 =====
+            if (isPlaying && client.player != null) {
+                if (playbackQueue.isEmpty()) {
+                    stopPlayback();
+                    client.player.sendMessage(Text.literal("§a✅ 回放完成"), false);
+                    return;
+                }
+
+                long elapsed = System.currentTimeMillis() - playbackStartTime;
+                while (!playbackQueue.isEmpty()) {
+                    String line = playbackQueue.peek();
+                    String[] parts = line.split(":");
+                    if (parts.length < 2) { playbackQueue.poll(); continue; }
+
+                    long time = Long.parseLong(parts[parts.length - 1]);
+                    if (time > elapsed) break;
+
+                    playbackQueue.poll();
+                    executePlaybackAction(parts);
+                }
+            }
             if (client.player == null) return;
 
             if (currentWalkTask != null) {
@@ -597,6 +1147,633 @@ public class ClientControlClient implements ClientModInitializer {
             // 保留垂直速度（跳跃/下落不受影响）
             double vy = client.player.getVelocity().y;
             client.player.setVelocity(vx, vy, vz);
+        }
+    }
+    // ==================== 录制系统 ====================
+
+    private void startRecording(String name) {
+        if (isRecording || isPlaying) {
+            client.player.sendMessage(Text.literal("§c已在录制或回放中"), false);
+            return;
+        }
+
+        try {
+            recordingDir.mkdirs();
+            File file = new File(recordingDir, name + ".txt");
+            recordingWriter = new BufferedWriter(new FileWriter(file));
+
+            recordingWriter.write("# ClientControl Recording: " + name);
+            recordingWriter.newLine();
+            recordingWriter.write("# Format: KEY:keyCode:pressed:time");
+            recordingWriter.newLine();
+            recordingWriter.write("#         MOUSE:button:pressed:time");
+            recordingWriter.newLine();
+            recordingWriter.write("#         LOOK:dyaw:dpitch:time");
+            recordingWriter.newLine();
+            recordingWriter.write("#         HOTBAR:slot:time");
+            recordingWriter.newLine();
+            recordingWriter.write("#         SCROLL:delta:time");
+            recordingWriter.newLine();
+            recordingWriter.write("#         CMD:command:time");
+            recordingWriter.newLine();
+            recordingWriter.write("#Record Version:" + RECORDING_VERSION);
+            recordingWriter.newLine();
+            recordingWriter.write("#=== START ===");
+            recordingWriter.newLine();
+
+            if (client.player != null) {
+                recordingStartYaw = client.player.getYaw();
+                recordingStartPitch = client.player.getPitch();
+                recordingStartX = client.player.getX();
+                recordingStartY = client.player.getY();
+                recordingStartZ = client.player.getZ();
+                recordingHotbarSlot = client.player.getInventory().getSelectedSlot();
+            }
+
+            // 重置去重状态
+            lastKeyStates.clear();
+            lastRecordedYaw = Float.NaN;
+            lastRecordedPitch = Float.NaN;
+            lastCalibrationTime = 0;
+            flushCounter = 0;
+            lastCalibrationTime = 0;
+
+            isRecording = true;
+            currentRecordingName = name;
+            recordingStartTime = System.currentTimeMillis();
+
+            recordInitialState();
+
+            client.player.sendMessage(Text.literal("§a开始录制: " + name), false);
+            System.out.println("[ClientControl] 开始录制: " + name);
+
+        } catch (Exception e) {
+            System.err.println("[ClientControl] 开始录制失败: " + e.getMessage());
+        }
+    }
+
+    private void recordInitialState() {
+        if (client.player == null) return;
+        long time = System.currentTimeMillis() - recordingStartTime;
+
+        try {
+            // 初始化所有录制按键的状态为未按下
+            lastKeyStates.clear();
+            for (int keyCode : RECORDED_KEYS) {
+                lastKeyStates.put(keyCode, false);
+            }
+
+            // ====== 记录初始物品栏槽位 ======
+            try {
+                java.lang.reflect.Field field = net.minecraft.entity.player.PlayerInventory.class.getDeclaredField("selectedSlot");
+                field.setAccessible(true);
+                int initialSlot = field.getInt(client.player.getInventory());
+                recordingWriter.write("SLOT:" + initialSlot + ":" + time);
+                recordingWriter.newLine();
+            } catch (Exception e) {
+                System.err.println("[ClientControl] 记录初始槽位失败: " + e.getMessage());
+            }
+
+            // 记录初始视角
+            recordingWriter.write("LOOK:0.0:0.0:" + time);
+            recordingWriter.newLine();
+            recordingWriter.flush();
+        } catch (Exception e) {
+            System.err.println("[ClientControl] 记录初始状态失败: " + e.getMessage());
+        }
+    }
+
+    private void stopRecording() {
+        if (!isRecording) {
+            client.player.sendMessage(Text.literal("§c没有正在进行的录制"), false);
+            return;
+        }
+
+        try {
+            if (recordingWriter != null) {
+                recordingWriter.write("#=== END ===");
+                recordingWriter.newLine();
+                recordingWriter.close();
+                recordingWriter = null;
+            }
+
+            isRecording = false;
+            client.player.sendMessage(Text.literal("§a录制已保存: " + currentRecordingName), false);
+            System.out.println("[ClientControl] 录制已保存: " + currentRecordingName);
+
+        } catch (Exception e) {
+            System.err.println("[ClientControl] 保存录制失败: " + e.getMessage());
+        }
+    }
+
+    // ==================== 方块事件回调（供 Mixin 调用） ====================
+
+    /**
+     * 玩家开始挖掘方块时调用
+     */
+    public void onBlockBreakStart(net.minecraft.util.math.BlockPos pos) {
+        if (!isRecording || recordingWriter == null || client.player == null) return;
+
+        try {
+            long time = System.currentTimeMillis() - recordingStartTime;
+            // 玩家相对位置和视角（相对于录制起始点）
+            double px = client.player.getX() - recordingStartX;
+            double py = client.player.getY() - recordingStartY;
+            double pz = client.player.getZ() - recordingStartZ;
+            float yaw = client.player.getYaw() - recordingStartYaw;
+            float pitch = client.player.getPitch() - recordingStartPitch;
+
+            // 记录挖掘开始事件 + 位置视角校准
+            // 格式：BREAK_START:bx:by:bz:px:py:pz:yaw:pitch:time
+            // 注意：bx,by,bz 是方块的绝对坐标；px,py,pz,yaw,pitch 是玩家的相对值
+            recordingWriter.write(String.format("BREAK_START:%d:%d:%d:%.3f:%.3f:%.3f:%.2f:%.2f:%d",
+                    pos.getX(), pos.getY(), pos.getZ(),
+                    px, py, pz, yaw, pitch, time));
+            recordingWriter.newLine();
+            // 不单独 flush，统一在 recordTick 末尾写，减少磁盘 IO
+        } catch (Exception e) {
+            System.err.println("[ClientControl] 记录挖掘开始失败: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 玩家完成挖掘方块时调用
+     */
+    public void onBlockBreakComplete(net.minecraft.util.math.BlockPos pos) {
+        if (!isRecording || recordingWriter == null || client.player == null) return;
+
+        try {
+            long time = System.currentTimeMillis() - recordingStartTime;
+            // 记录挖掘完成事件
+            recordingWriter.write(String.format("BREAK:%d:%d:%d:%d",
+                    pos.getX(), pos.getY(), pos.getZ(), time));
+            recordingWriter.newLine();
+            recordingWriter.flush();
+        } catch (Exception e) {
+            System.err.println("[ClientControl] 记录挖掘完成失败: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 玩家放置方块时调用
+     */
+    public void onBlockPlace(net.minecraft.util.math.BlockPos pos) {
+        if (!isRecording || recordingWriter == null || client.player == null) return;
+
+        try {
+            long time = System.currentTimeMillis() - recordingStartTime;
+            // 玩家相对位置和视角（相对于录制起始点）
+            double px = client.player.getX() - recordingStartX;
+            double py = client.player.getY() - recordingStartY;
+            double pz = client.player.getZ() - recordingStartZ;
+            float yaw = client.player.getYaw() - recordingStartYaw;
+            float pitch = client.player.getPitch() - recordingStartPitch;
+
+            // 记录放置事件 + 位置视角校准
+            // 格式：PLACE:bx:by:bz:px:py:pz:yaw:pitch:time
+            // 注意：bx,by,bz 是方块的绝对坐标；px,py,pz,yaw,pitch 是玩家的相对值
+            recordingWriter.write(String.format("PLACE:%d:%d:%d:%.3f:%.3f:%.3f:%.2f:%.2f:%d",
+                    pos.getX(), pos.getY(), pos.getZ(),
+                    px, py, pz, yaw, pitch, time));
+            recordingWriter.newLine();
+            // 不单独 flush，统一在 recordTick 末尾写，减少磁盘 IO
+        } catch (Exception e) {
+            System.err.println("[ClientControl] 记录放置失败: " + e.getMessage());
+        }
+    }
+
+    private void recordTick() {
+        if (!isRecording || client.player == null) return;
+
+        long time = System.currentTimeMillis() - recordingStartTime;
+        long windowHandle = client.getWindow().getHandle();
+
+        try {
+            // ====== 要录制的键盘按键列表 ======
+            int[] keyboardKeys = {
+                GLFW.GLFW_KEY_W, GLFW.GLFW_KEY_A, GLFW.GLFW_KEY_S, GLFW.GLFW_KEY_D,
+                GLFW.GLFW_KEY_SPACE,
+                GLFW.GLFW_KEY_LEFT_SHIFT, GLFW.GLFW_KEY_RIGHT_SHIFT,
+                GLFW.GLFW_KEY_LEFT_CONTROL, GLFW.GLFW_KEY_RIGHT_CONTROL,
+                GLFW.GLFW_KEY_1, GLFW.GLFW_KEY_2, GLFW.GLFW_KEY_3,
+                GLFW.GLFW_KEY_4, GLFW.GLFW_KEY_5, GLFW.GLFW_KEY_6,
+                GLFW.GLFW_KEY_7, GLFW.GLFW_KEY_8, GLFW.GLFW_KEY_9,
+                GLFW.GLFW_KEY_E, GLFW.GLFW_KEY_Q, GLFW.GLFW_KEY_F
+            };
+
+            // 检测键盘按键状态变化
+            for (int keyCode : keyboardKeys) {
+                boolean pressed = GLFW.glfwGetKey(windowHandle, keyCode) == GLFW.GLFW_PRESS;
+                Boolean lastPressed = lastKeyStates.get(keyCode);
+
+                if (lastPressed == null || pressed != lastPressed) {
+                    lastKeyStates.put(keyCode, pressed);
+                    recordingWriter.write("KEY:" + keyCode + ":" + (pressed ? 1 : 0) + ":" + time);
+                    recordingWriter.newLine();
+                }
+            }
+
+            // ====== 要录制的鼠标按键列表 ======
+            int[] mouseButtons = {
+                GLFW.GLFW_MOUSE_BUTTON_LEFT,
+                GLFW.GLFW_MOUSE_BUTTON_RIGHT
+            };
+
+            // 检测鼠标按键状态变化
+            for (int button : mouseButtons) {
+                boolean pressed = GLFW.glfwGetMouseButton(windowHandle, button) == GLFW.GLFW_PRESS;
+                // 用负数表示鼠标按键，避免和键盘按键码冲突
+                int mapKey = -1 - button;
+                Boolean lastPressed = lastKeyStates.get(mapKey);
+
+                if (lastPressed == null || pressed != lastPressed) {
+                    lastKeyStates.put(mapKey, pressed);
+                    recordingWriter.write("MOUSE:" + button + ":" + (pressed ? 1 : 0) + ":" + time);
+                    recordingWriter.newLine();
+                }
+            }
+
+            // ====== 视角变化检测 ======
+            float relYaw = client.player.getYaw() - recordingStartYaw;
+            float relPitch = client.player.getPitch() - recordingStartPitch;
+            boolean lookChanged = Float.isNaN(lastRecordedYaw) ||
+                    Math.abs(relYaw - lastRecordedYaw) > 0.5 ||
+                    Math.abs(relPitch - lastRecordedPitch) > 0.5;
+
+            if (lookChanged) {
+                recordingWriter.write(String.format("LOOK:%.1f:%.1f:%d", relYaw, relPitch, time));
+                recordingWriter.newLine();
+                lastRecordedYaw = relYaw;
+                lastRecordedPitch = relPitch;
+            }
+
+            // ====== 快捷栏变化检测 ======
+            int currentSlot = client.player.getInventory().getSelectedSlot();;
+            if (currentSlot != recordingHotbarSlot) {
+                recordingHotbarSlot = currentSlot;
+                recordingWriter.write("HOTBAR:" + currentSlot + ":" + time);
+                recordingWriter.newLine();
+            }
+
+            // ====== 滚轮录制 ======
+            double scrollDelta = getAndClearScrollDelta();
+            if (scrollDelta != 0) {
+                // 记录滚轮（格式：SCROLL:delta:time）
+                recordingWriter.write("SCROLL:" + scrollDelta + ":" + time);
+                recordingWriter.newLine();
+            }
+
+            // ====== 定期位置校准 ======
+            if (config.calibrationRate > 0 && time - lastCalibrationTime >= config.calibrationRate) {
+                lastCalibrationTime = time;
+                // 记录相对位置和相对视角（相对于录制起始点）
+                double dx = client.player.getX() - recordingStartX;
+                double dy = client.player.getY() - recordingStartY;
+                double dz = client.player.getZ() - recordingStartZ;
+                float dyaw = client.player.getYaw() - recordingStartYaw;
+                float dpitch = client.player.getPitch() - recordingStartPitch;
+                recordingWriter.write(String.format("CALIB:%.3f:%.3f:%.3f:%.2f:%.2f:%d",
+                        dx, dy, dz, dyaw, dpitch, time));
+                recordingWriter.newLine();
+            }
+
+            // 每 N tick 刷一次盘，减少磁盘 IO
+            flushCounter++;
+            if (flushCounter >= FLUSH_INTERVAL) {
+                recordingWriter.flush();
+                flushCounter = 0;
+            }
+        } catch (Exception e) {
+            System.err.println("[ClientControl] 录制出错: " + e.getMessage());
+        }
+    }
+
+    private void listRecordings() {
+        recordingDir.mkdirs();
+        File[] files = recordingDir.listFiles((dir, name) -> name.endsWith(".txt"));
+
+        if (files == null || files.length == 0) {
+            client.player.sendMessage(Text.literal("§e没有找到录制文件"), false);
+            return;
+        }
+
+        client.player.sendMessage(Text.literal("§6=== 录制文件列表 ==="), false);
+        for (File file : files) {
+            String name = file.getName().replace(".txt", "");
+            client.player.sendMessage(Text.literal("§7- " + name), false);
+        }
+    }
+
+    // ==================== 回放系统 ====================
+
+    private void startPlayback(String name) {
+        if (isPlaying || isRecording) {
+            client.player.sendMessage(Text.literal("§c已在回放或录制中"), false);
+            return;
+        }
+
+        File file = new File(recordingDir, name + ".txt");
+        if (!file.exists()) {
+            client.player.sendMessage(Text.literal("§c未找到录制: " + name), false);
+            return;
+        }
+
+        try {
+            playbackQueue.clear();
+            BufferedReader reader = new BufferedReader(new FileReader(file));
+            String line;
+            boolean inRecording = false;
+            boolean rightversion = false;
+
+            while ((line = reader.readLine()) != null) {
+                line = line.trim();
+                if (line.isEmpty()) continue;
+                if (line.startsWith("#Record Version:" + RECORDING_VERSION)) rightversion = true;
+                if (line.startsWith("#=== START ===") && rightversion) { inRecording = true; continue; }
+                if (line.startsWith("#=== END ===")) break;
+                if (line.startsWith("#")) continue;
+                if (inRecording) {
+                    // 给鼠标左键释放加 1 tick（50ms），保证挖掘/攻击能被游戏检测到
+                    if (line.startsWith("MOUSE:0:0:")) {
+                        String[] parts = line.split(":");
+                        if (parts.length >= 4) {
+                            try {
+                                int time = Integer.parseInt(parts[3]) + 50;
+                                line = "MOUSE:0:0:" + time;
+                            } catch (NumberFormatException e) {
+                                System.out.println("解析失败：无法在左键中插入1tick");
+                                // 解析失败就用原来的
+                            }
+                        }
+                    }
+                    playbackQueue.add(line);
+                }
+            }
+            reader.close();
+
+            if (playbackQueue.isEmpty()) {
+                client.player.sendMessage(Text.literal("§c录制文件为空或版本不兼容"), false);
+                return;
+            }
+
+            isPlaying = true;
+            currentRecordingName = name;
+            playbackStartTime = System.currentTimeMillis();
+
+            // 记录回放起始视角和位置
+            if (client.player != null) {
+                playbackStartYaw = client.player.getYaw();
+                playbackStartPitch = client.player.getPitch();
+                playbackStartX = client.player.getX();
+                playbackStartY = client.player.getY();
+                playbackStartZ = client.player.getZ();
+                playbackHotbarSlot = client.player.getInventory().getSelectedSlot();
+            }
+
+            client.player.sendMessage(Text.literal("§a▶️ 开始回放: " + name +
+                    " (" + playbackQueue.size() + " 帧)"), false);
+            System.out.println("[ClientControl] 开始回放: " + name);
+
+        } catch (Exception e) {
+            System.err.println("[ClientControl] 加载录制失败: " + e.getMessage());
+            client.player.sendMessage(Text.literal("§c加载失败: " + e.getMessage()), false);
+        }
+    }
+
+    private void stopPlayback() {
+        if (!isPlaying) {
+            client.player.sendMessage(Text.literal("§c没有正在进行的回放"), false);
+            return;
+        }
+
+        isPlaying = false;
+        playbackQueue.clear();
+
+        // 重置所有按键状态
+        if (client.options != null) {
+            client.options.forwardKey.setPressed(false);
+            client.options.backKey.setPressed(false);
+            client.options.leftKey.setPressed(false);
+            client.options.rightKey.setPressed(false);
+            client.options.jumpKey.setPressed(false);
+            client.options.sneakKey.setPressed(false);
+            client.options.sprintKey.setPressed(false);
+            client.options.attackKey.setPressed(false);
+            client.options.useKey.setPressed(false);
+            client.options.inventoryKey.setPressed(false);
+            client.options.dropKey.setPressed(false);
+            client.options.swapHandsKey.setPressed(false);
+        }
+
+        if (client.player != null) {
+            client.player.sendMessage(Text.literal("§c回放已停止"), false);
+        }
+        System.out.println("[ClientControl] 回放已停止");
+    }
+    // ==================== 寻路系统 ====================
+
+    private void executePlaybackAction(String[] parts) {
+        String type = parts[0];
+
+        switch (type) {
+            case "KEY":
+                // KEY:keyCode:pressed:time
+                if (parts.length >= 4) {
+                    int keyCode = Integer.parseInt(parts[1]);
+                    boolean pressed = Integer.parseInt(parts[2]) == 1;
+                    simulateKeyByGLFWCode(keyCode, pressed);
+                }
+                break;
+
+            case "MOUSE":
+                // MOUSE:button:pressed:time
+                if (parts.length >= 4) {
+                    int button = Integer.parseInt(parts[1]);
+                    boolean pressed = Integer.parseInt(parts[2]) == 1;
+                    simulateKeyByGLFWCode(button, pressed);
+                }
+                break;
+
+            case "ALLKEYS":
+                // 兼容旧格式 ALLKEYS:key0:key1:...:key511:time
+                if (parts.length >= 3) {
+                    for (int i = 1; i < parts.length - 1; i++) {
+                        int keyCode = i - 1;
+                        if (keyCode >= 512) break;
+                        boolean pressed = Integer.parseInt(parts[i]) == 1;
+                        simulateKeyByGLFWCode(keyCode, pressed);
+                    }
+                }
+                break;
+
+            case "HOTBAR":
+                // HOTBAR:slot:time
+                if (parts.length >= 3) {
+                    int slot = Integer.parseInt(parts[1]);
+                    if (client.player != null) {
+                        client.player.getInventory().setSelectedSlot(slot);
+                    }
+                }
+                break;
+
+            case "SLOT":
+                // SLOT:slotIndex:time - 设置物品栏槽位
+                if (parts.length >= 3) {
+                    int slot = Integer.parseInt(parts[1]);
+                    if (client.player != null) {
+                        try {
+                            java.lang.reflect.Field field = net.minecraft.entity.player.PlayerInventory.class.getDeclaredField("selectedSlot");
+                            field.setAccessible(true);
+                            field.setInt(client.player.getInventory(), slot);
+                        } catch (Exception e) {
+                            System.err.println("[ClientControl] 设置槽位失败: " + e.getMessage());
+                        }
+                    }
+                }
+                break;
+
+            case "SCROLL":
+                // SCROLL:delta:time - 滚轮滚动
+                if (parts.length >= 3) {
+                    double deltaDouble = Double.parseDouble(parts[1]);
+                    int delta = (int) Math.round(deltaDouble);
+
+                    if (delta != 0 && client.player != null) {
+                        try {
+                            java.lang.reflect.Field field = net.minecraft.entity.player.PlayerInventory.class.getDeclaredField("selectedSlot");
+                            field.setAccessible(true);
+                            int current = field.getInt(client.player.getInventory());
+
+                            // 注意：Minecraft 滚轮向上 = 序号减小（向左），向下 = 序号增大（向右）
+                            // delta > 0 是向上滚，所以用 current - delta
+                            int newSlot = (current - delta + 10) % 9;
+                            if (newSlot < 0) newSlot += 9;
+
+                            field.setInt(client.player.getInventory(), newSlot);
+                        } catch (Exception e) {
+                            System.err.println("[ClientControl] 滚轮切换物品栏失败: " + e.getMessage());
+                        }
+                    }
+                }
+                break;
+
+            case "LOOK":
+                // LOOK:relYaw:relPitch:time
+                if (parts.length >= 4) {
+                    float relYaw = Float.parseFloat(parts[1]);
+                    float relPitch = Float.parseFloat(parts[2]);
+                    if (client.player != null) {
+                        client.player.setYaw(playbackStartYaw + relYaw);
+                        client.player.setPitch(playbackStartPitch + relPitch);
+                    }
+                }
+                break;
+
+            case "CALIB":
+                // CALIB:dx:dy:dz:dyaw:dpitch:time - 位置校准点（相对值）
+                // 用于修正按键回放的累积误差，确保关键位置精准
+                if (parts.length >= 6) {
+                    try {
+                        double dx = Double.parseDouble(parts[1]);
+                        double dy = Double.parseDouble(parts[2]);
+                        double dz = Double.parseDouble(parts[3]);
+                        float dyaw = Float.parseFloat(parts[4]);
+                        float dpitch = Float.parseFloat(parts[5]);
+
+                        if (client.player != null) {
+                            // 回放起始位置 + 相对偏移 = 实际位置
+                            client.player.setPos(playbackStartX + dx, playbackStartY + dy, playbackStartZ + dz);
+                            client.player.setYaw(playbackStartYaw + dyaw);
+                            client.player.setPitch(playbackStartPitch + dpitch);
+                        }
+                    } catch (NumberFormatException e) {
+                        System.err.println("[ClientControl] 校准点解析失败: " + e.getMessage());
+                    }
+                }
+                break;
+
+            case "BREAK_START":
+                // BREAK_START:bx:by:bz:px:py:pz:yaw:pitch:time
+                // 开始挖掘方块 - 精准校准位置和视角，确保对准方块
+                // 注意：px,py,pz,yaw,pitch 是玩家的相对值（相对于录制起始点）
+                if (parts.length >= 9) {
+                    try {
+                        // 检查配置：只有"全部校准"模式才校准挖掘
+                        int mode = com.qiujunawa.clientcontrol.config.ClientControlConfig.blockEventCalibration.getIntegerValue();
+                        if (mode >= 2 && client.player != null) {
+                            // 方块位置（暂时用于参考，主要用玩家位置校准）
+                            // int bx = Integer.parseInt(parts[1]);
+                            // int by = Integer.parseInt(parts[2]);
+                            // int bz = Integer.parseInt(parts[3]);
+
+                            // 玩家相对位置和视角
+                            double px = Double.parseDouble(parts[4]);
+                            double py = Double.parseDouble(parts[5]);
+                            double pz = Double.parseDouble(parts[6]);
+                            float yaw = Float.parseFloat(parts[7]);
+                            float pitch = Float.parseFloat(parts[8]);
+
+                            // 回放起始位置 + 相对偏移 = 实际位置
+                            client.player.setPos(playbackStartX + px, playbackStartY + py, playbackStartZ + pz);
+                            client.player.setYaw(playbackStartYaw + yaw);
+                            client.player.setPitch(playbackStartPitch + pitch);
+                        }
+                    } catch (NumberFormatException e) {
+                        System.err.println("[ClientControl] 挖掘开始事件解析失败: " + e.getMessage());
+                    }
+                }
+                break;
+
+            case "BREAK":
+                // BREAK:bx:by:bz:time
+                // 挖掘完成 - 可用于验证或额外校准
+                if (parts.length >= 4) {
+                    // 目前只记录，不做特殊处理
+                    // 以后可以加：验证方块是否真的被挖掉，没挖掉就补一下
+                }
+                break;
+
+            case "PLACE":
+                // PLACE:bx:by:bz:px:py:pz:yaw:pitch:time
+                // 放置方块 - 精准校准位置和视角，确保对准放置点
+                // 注意：px,py,pz,yaw,pitch 是玩家的相对值（相对于录制起始点）
+                if (parts.length >= 9) {
+                    try {
+                        // 方块位置（暂时用于参考）
+                        // int bx = Integer.parseInt(parts[1]);
+                        // int by = Integer.parseInt(parts[2]);
+                        // int bz = Integer.parseInt(parts[3]);
+
+                        // 玩家相对位置和视角
+                        double px = Double.parseDouble(parts[4]);
+                        double py = Double.parseDouble(parts[5]);
+                        double pz = Double.parseDouble(parts[6]);
+                        float yaw = Float.parseFloat(parts[7]);
+                        float pitch = Float.parseFloat(parts[8]);
+
+                        // 检查配置：仅放置 和 全部校准 模式都校准放置
+                        int mode = com.qiujunawa.clientcontrol.config.ClientControlConfig.blockEventCalibration.getIntegerValue();
+                        if (mode >= 1 && client.player != null) {
+                            // 回放起始位置 + 相对偏移 = 实际位置
+                            client.player.setPos(playbackStartX + px, playbackStartY + py, playbackStartZ + pz);
+                            client.player.setYaw(playbackStartYaw + yaw);
+                            client.player.setPitch(playbackStartPitch + pitch);
+                        }
+                    } catch (NumberFormatException e) {
+                        System.err.println("[ClientControl] 放置事件解析失败: " + e.getMessage());
+                    }
+                }
+                break;
+
+            case "CMD":
+                // CMD:command:time
+                if (parts.length >= 3) {
+                    String command = parts[1];
+                    if (client.player != null && command != null && !command.isEmpty()) {
+                        client.player.networkHandler.sendChatMessage(command);
+                    }
+                }
+                break;
         }
     }
 }
