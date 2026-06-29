@@ -26,8 +26,8 @@
 		"clientcontrol.mixins.json"
 	],
 	"depends": {
-		"fabricloader": ">=0.19.3",
-		"minecraft": "~1.21.6",
+		"fabricloader": ">=0.18.1",
+		"minecraft": "~1.21.4",
 		"java": ">=21",
 		"fabric-api": "*"
 	}

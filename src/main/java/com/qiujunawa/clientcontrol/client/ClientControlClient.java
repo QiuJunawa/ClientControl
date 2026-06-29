@@ -1187,7 +1187,7 @@ public class ClientControlClient implements ClientModInitializer {
                 recordingStartX = client.player.getX();
                 recordingStartY = client.player.getY();
                 recordingStartZ = client.player.getZ();
-                recordingHotbarSlot = client.player.getInventory().getSelectedSlot();
+                recordingHotbarSlot = client.player.getInventory().selectedSlot;
             }
 
             // 重置去重状态
@@ -1408,7 +1408,7 @@ public class ClientControlClient implements ClientModInitializer {
             }
 
             // ====== 快捷栏变化检测 ======
-            int currentSlot = client.player.getInventory().getSelectedSlot();;
+            int currentSlot = client.player.getInventory().selectedSlot;
             if (currentSlot != recordingHotbarSlot) {
                 recordingHotbarSlot = currentSlot;
                 recordingWriter.write("HOTBAR:" + currentSlot + ":" + time);
@@ -1527,7 +1527,7 @@ public class ClientControlClient implements ClientModInitializer {
                 playbackStartX = client.player.getX();
                 playbackStartY = client.player.getY();
                 playbackStartZ = client.player.getZ();
-                playbackHotbarSlot = client.player.getInventory().getSelectedSlot();
+                playbackHotbarSlot = client.player.getInventory().selectedSlot;
             }
 
             client.player.sendMessage(Text.literal("§a▶️ 开始回放: " + name +
